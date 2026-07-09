@@ -1,0 +1,87 @@
+# SYSTEM CONTEXT & PROJECT MIGRATION BLUEPRINT
+I have migrated an end-to-end medical Retrieval-Augmented Generation (RAG) Proof of Concept (PoC) from a personal development machine to this secure corporate workstation. Please ingest this entire configuration before generating any code or modifications.
+
+## 1. Project Objective & Data
+* **Goal:** Build a highly precise RAG pipeline to query medical documentation locally.
+* **Source Data:** Official FDA prescribing label for Ozempic (PDF format).
+
+## 2. Environment & Dependency Stack
+* **IDE & Runtime:** VS Code, Jupyter Notebooks (.ipynb), Python 3.12 (clean virtual environment).
+* **Global Runtimes:** Node.js and npm are globally installed for future frontend/UI scaffolding.
+* **Core Packages:** The environment has been built using the following exact specification:
+    pip install langchain langchain-community langchain-core langchain-text-splitters langchain-huggingface langchain-openai langchain-classic pypdf chromadb sentence-transformers ipykernel
+
+## 3. Two-Notebook Modular Architecture
+The codebase is divided strictly into two files to separate storage processing from runtime inference:
+
+### File 1: `create_db.ipynb` (Ingestion & Vectorization)
+* **Process:** Reads the Ozempic PDF -> Extracts text using `pypdf` -> Executes recursive character text splitting.
+* **Embeddings:** Generated locally using `HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")` to ensure raw text never leaves the local disk during vectorization.
+* **Storage:** Vector store is initialized and persisted locally to a directory named `./chroma_db`.
+
+### File 2: `chatbot.ipynb` (Retrieval & Generation Chain)
+* **Database Hook:** Loads the existing local `./chroma_db` directory using the identical HuggingFace embedding function, exposing it as a retriever via `.as_retriever(search_kwargs={"k": 3})`.
+* **LLM Connectivity (Corporate Gateway Proxy):** We do NOT use standard Azure libraries or `AzureChatOpenAI` because native Azure URL formatting appends endpoints that conflict with our proxy routing. Instead, we use the base `langchain_openai.ChatOpenAI` class to pass custom configurations directly.
+* **Credentials & Routing:**
+    - Base URL: "https://amer-shared-services.pwcinternal.com/v1" (or stripped to the domain root if paths mismatch)
+    - Model String: "azure-gpt-4.1-mini" (the gateway maps this to the designated Azure instance)
+    - Authentication: Secured via corporate API Key.
+
+## 4. Active Active Script (`chatbot.ipynb`)
+This is the current functional state of our retrieval pipeline:
+
+import os
+from langchain_community.vectorstores import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_classic.chains import create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+
+# --- 1. PwC Gateway Configuration ---
+PWC_GATEWAY_URL = "https://amer-shared-services.pwcinternal.com/v1"
+PWC_API_KEY = "YOUR_ACTIVE_CORPORATE_KEY"
+
+llm = ChatOpenAI(
+    base_url=PWC_GATEWAY_URL,
+    api_key=PWC_API_KEY,
+    model="azure-gpt-4.1-mini",
+    temperature=0.2
+)
+
+# --- 2. Load Local Vector Store ---
+CHROMA_DB_DIR = "./chroma_db"
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vector_db = Chroma(persist_directory=CHROMA_DB_DIR, embedding_function=embedding_model)
+retriever = vector_db.as_retriever(search_kwargs={"k": 3})
+
+# --- 3. Prompt Infrastructure ---
+system_prompt = (
+    "You are a helpful and precise medical assistant. Use the following retrieved context "
+    "from the Ozempic prescribing label to answer the user's question. If you don't know the answer "
+    "based on the context, just say that you don't know. Do not make up information.\n\n"
+    "Context: {context}"
+)
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "{input}"),
+])
+
+# --- 4. Chain Execution ---
+question_answer_chain = create_stuff_documents_chain(llm, prompt)
+rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+
+def ask_ozempic_bot(question):
+    print(f"Querying local database for: '{question}'...")
+    response = rag_chain.invoke({"input": question})
+    print("\n🤖 BOT ANSWER:\n" + "-"*50)
+    print(response['answer'])
+    print("\nSources utilized:")
+    for i, doc in enumerate(response['context']):
+        print(f" - Chunk {i+1} (Page {doc.metadata.get('page', 'Unknown')})")
+
+## 5. Instructions for System Responses
+1. **Infrastructure Constraint:** Maintain the core connection architecture as written. Do not swap `ChatOpenAI` for `AzureChatOpenAI`, and do not propose moving away from a local Chroma vector database.
+2. **Phase 1 (Immediate Goal):** Help me verify that this baseline script runs without triggering 401, 404, or corporate SSL proxy handshake errors on this network.
+3. **Phase 2 (Room for Improvement):** Once baseline connectivity is confirmed, I want you to actively suggest optimizations. This includes improving our recursive chunking strategies, tuning the system prompt parameters, adding metadata filtering, or implementing advanced retrieval techniques (like re-ranking or parent-document retrieval) within this local framework.
+4. Confirm your understanding, and let me know if you are ready to evaluate the first execution outputs.
